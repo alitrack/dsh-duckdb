@@ -102,9 +102,15 @@ Agent：[duckdb_schema target=/workspace/sales.csv]
 ```bash
 node --test                    # 59 条单测
 node tests/e2e/keyless.mjs     # 10 条免 key e2e（真跑 duckdb CLI）
+bash tests/e2e/run_e2e.sh      # 完整 headless e2e，同样不需要 API key
 ```
 
-免 key 的 e2e harness 直接驱插件的 Cordis 契约（假 `ctx` + 假 `exec`），不需要模型和 API key。完整 headless e2e（需要配好 provider）是剩下的缺口，见 `tests/e2e/run_e2e.sh`。
+免 key 的 e2e harness 直接驱插件的 Cordis 契约（假 `ctx` + 假 `exec`），不需要模型和 API key。
+
+完整 headless e2e 也不需要 key：`tests/e2e/run_e2e.sh` 通过 `llm-pi-ai` 适配器把 dsh 指向本地 OpenAI 兼容端点。要换成你自己的模型，改 `tests/e2e/local-model-overlay.yml`。两点注意：
+
+- **本地服务器不能走 `llm-deepseek`**——那个适配器只说 Anthropic Messages 协议。`DEEPSEEK_BASE_URL` 只能挪端点，改不了协议。
+- **版本兼容门不是 CLI 命令**。dsh 的报错让你跑 `dsh plugin allow-version`，但那命令不存在，会 fallthrough 到 pnpm 然后失败。真机制是 profile 本地的 `compatibility.json`，把精确 `name@version` 映射到精确 dsh 版本。`run_e2e.sh` 会自动写它。
 
 ### 已实测的 duckdb CLI 行为
 

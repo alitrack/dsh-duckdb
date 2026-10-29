@@ -1,0 +1,31 @@
+# Local-model overlay for the full headless e2e.
+#
+# Points the agent at a local OpenAI-compatible endpoint so the whole dsh
+# agent loop can run without any API key. Follows the same pattern as
+# sigil/benchmark/run_dsh.py.
+#
+# WHY llm-pi-ai AND NOT llm-deepseek: the deepseek adapter only speaks the
+# Anthropic Messages protocol — its source (dsh-llm-deepseek/lib/index.js:401)
+# states `protocol is not configurable; ... use a Messages-compatible
+# baseURL`. DEEPSEEK_BASE_URL can move the endpoint but not the protocol, so
+# an OpenAI-compatible local server must go through the pi-ai adapter.
+#
+# apiKeyEnv must still resolve even for a local model (pi-ai refuses to
+# authenticate otherwise); the value itself is arbitrary.
+- id: agent-default-model
+  config:
+    provider: local-qwen
+    model: qwen3.8-27b
+- id: llm-pi-ai
+  config:
+    providers:
+      local-qwen:
+        displayName: Local Qwen SGLang
+        apiKeyEnv: LOCAL_QWEN_API_KEY
+        api: openai-completions
+        baseURL: http://10.10.10.115:8014/v1
+        models:
+          - id: qwen3.8-27b
+            name: Qwen3.8 27B (sglang)
+            contextWindow: 262144
+            maxTokens: 32768

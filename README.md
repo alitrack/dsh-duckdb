@@ -103,9 +103,15 @@ Agent: [duckdb_schema target=/workspace/sales.csv]
 ```bash
 node --test                    # 59 unit tests
 node tests/e2e/keyless.mjs     # 10 key-free e2e checks against the real duckdb CLI
+bash tests/e2e/run_e2e.sh      # full headless e2e, no API key needed
 ```
 
-The key-free e2e harness drives the plugin's Cordis contract directly (fake `ctx` + fake `exec`) and needs no model or API key. The full headless e2e — which needs a configured provider — is the remaining gap; see `tests/e2e/run_e2e.sh`.
+The key-free harness drives the plugin's Cordis contract directly (fake `ctx` + fake `exec`) and needs no model or API key.
+
+The headless run needs no API key either: `tests/e2e/run_e2e.sh` points dsh at a local OpenAI-compatible endpoint through the `llm-pi-ai` adapter. To retarget it at your own model, edit `tests/e2e/local-model-overlay.yml`. Two things to know:
+
+- **`llm-deepseek` will not work for a local server** — that adapter only speaks the Anthropic Messages protocol. `DEEPSEEK_BASE_URL` moves the endpoint but not the protocol.
+- **The version gate is not a CLI command.** dsh's error message points you at `dsh plugin allow-version`, which does not exist; it falls through to pnpm and fails. The real mechanism is a profile-local `compatibility.json` mapping exact `name@version` to exact dsh versions. `run_e2e.sh` writes it automatically.
 
 ### Verified duckdb CLI behaviour
 
