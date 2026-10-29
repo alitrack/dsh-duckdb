@@ -1,0 +1,39 @@
+{
+  "name": "dsh-duckdb",
+  "version": "0.1.0",
+  "description": "Query local data files with SQL from inside DeepSeek Harness (dsh) — zero Python, zero external services.",
+  "type": "module",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "^0.0.1-rc.1"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alitrack/dsh-duckdb.git"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "duckdb",
+    "sql",
+    "olap"
+  ]
+}

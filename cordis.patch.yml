@@ -1,0 +1,4 @@
+# The dsh-duckdb bundle patch: mounts the plugin over the tools registry.
+- insert:
+    - id: dsh-duckdb
+      name: dsh-duckdb

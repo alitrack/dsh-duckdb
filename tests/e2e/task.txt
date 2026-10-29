@@ -1,0 +1,1 @@
+Use the duckdb_schema tool to inspect the file /mnt/d/wsl2/dsh-duckdb/tests/e2e/ws/sales.csv and report its columns and row count. Then use duckdb_query to compute the total amount grouped by city. Reply with just the numbers.
