@@ -69,7 +69,7 @@ try {
   // the same per-step data, so parse from the ring if result was consumed.
   const resultText = read.result ?? read.chunks.map((c) => c.text).join('')
   const results = [...resultText.matchAll(/"ok":\s*(true|false)/g)].map((m) => m[1] === 'true')
-  assert.equal(read.job.status, 'succeeded')
+  assert.equal(read.job.status, 'completed')
   assert.equal(read.chunks.length, 3, 'one ring chunk per step')
   assert.ok(results.every((ok) => ok), 'every step succeeded')
   console.log('✓ 3 steps settled succeeded; ring captured', read.chunks.length, 'chunks')

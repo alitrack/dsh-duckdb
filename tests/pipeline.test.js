@@ -46,7 +46,7 @@ test('pipelineJobSpec: happy path reports per-step results', async () => {
     const progress = []
     const hooks = spec.run({ id: 'duckdb-test', append: (t) => appended.push(t), updateProgress: (l) => progress.push(l) })
     const outcome = await hooks.done
-    assert.equal(outcome.status, 'succeeded')
+    assert.equal(outcome.status, 'completed')
     const result = JSON.parse(outcome.result)
     assert.equal(result.ok, true)
     assert.equal(result.steps, 2)
@@ -95,7 +95,7 @@ test('pipelineJobSpec: cancel() halts before the next step', async () => {
     updateProgress: () => { if (!cancelledFlag) { cancelledFlag = true; hooks.cancel() } },
   })
   const outcome = await hooks.done
-  assert.equal(outcome.status, 'cancelled')
+  assert.equal(outcome.status, 'killed')
 })
 
 test('STEP_TIMEOUT_MS is generous for pipelines', () => {
