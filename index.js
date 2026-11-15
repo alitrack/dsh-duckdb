@@ -20,6 +20,7 @@ import { clampMaxRows, projectRows } from './lib/rows.js'
 import { runQuery, readerFor, DUCKDB_BIN_ENV } from './lib/cli.js'
 import { Catalog } from './lib/catalog.js'
 import { validateConversion, buildConvertStatement } from './lib/convert.js'
+import { lakeCreate, lakeWrite, lakePrelude, validateLakeName, validateTableName } from './lib/lake.js'
 import { resolveGate, extensionAllowed, describeGate, ALLOW_REMOTE_ENV, ALLOW_EXTENSIONS_ENV } from './lib/extgate.js'
 import { checkRemoteAccess, checkLoadStatement } from './lib/guard.js'
 import { validatePipeline, pipelineJobSpec } from './lib/pipeline.js'
@@ -201,6 +202,11 @@ export function apply(ctx) {
       // would be a no-op for every later call). Only installed ones load; the
       // model never writes LOAD itself.
       const extensionPrelude = await extensionPreludeFor()
+      // Lakes registered in this workspace are ATTACHed ahead of the query so
+      // `SELECT * FROM lake_x.t` just works — same replay pattern as file
+      // views, but backed by persistent DuckLake files.
+      const lakeLines = lakePrelude(catalog, root)
+      const prelude = [...extensionPrelude, ...lakeLines]
 
       const attached = resolveFiles(args.files, root)
       if (!attached.ok) return failure(attached.code, attached.detail)
@@ -223,7 +229,7 @@ export function apply(ctx) {
         unsigned: false,
         timeoutMs: DEFAULT_TIMEOUT_MS,
         signal: exec.signal,
-        extensionPrelude,
+        extensionPrelude: prelude,
         ...(binary !== undefined ? { binary } : {}),
       })
 
@@ -477,7 +483,7 @@ export function apply(ctx) {
       }],
     },
     execute(_args, exec) {
-      return { ok: true, attachments: catalog.list(sessionWorkspace(exec)) }
+      return { ok: true, attachments: catalog.list(sessionWorkspace(exec)), lakes: catalog.listLakes(sessionWorkspace(exec)) }
     },
   }))
 
@@ -714,6 +720,81 @@ export function apply(ctx) {
       })
       const jobId = ctx.jobs.start(spec)
       return { ok: true, job_id: jobId, step_count: validated.steps.length }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'duckdb_lake_create',
+    description:
+      'Create (or reopen) a persistent DuckLake dataset under the workspace. Lakes survive across ' +
+      'sessions: write once with duckdb_lake_write, query as lake_<name>.<table> from any later ' +
+      'call. Creating an existing lake is a no-op reopen, never a wipe.',
+    parameters: {
+      name: {
+        type: 'string',
+        required: true,
+        description: 'lake name, [a-z][a-z0-9_] up to 64 chars',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: true,
+      },
+    },
+    async execute(args, exec) {
+      const root = sessionWorkspace(exec)
+      const created = await lakeCreate({ root, name: args.name, binary })
+      if (!created.ok) return failure(created.code, created.detail)
+      catalog.registerLake(created.path ? args.name : args.name, root)
+      return { ok: true, name: args.name, path: created.path, fresh: created.fresh }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'duckdb_lake_write',
+    description:
+      'Copy a workspace data file (csv/parquet/json) into a lake table (persistent). Use ' +
+      'replace=true to overwrite an existing table explicitly. After writing, query it as ' +
+      'lake_<name>.<table>.',
+    parameters: {
+      name: {
+        type: 'string',
+        required: true,
+        description: 'existing lake name (duckdb_lake_create first)',
+      },
+      table: {
+        type: 'string',
+        required: true,
+        description: 'target table name, [a-z][a-z0-9_] up to 64 chars',
+      },
+      source: {
+        type: 'string',
+        required: true,
+        description: 'absolute path of the source file inside the workspace',
+      },
+      replace: {
+        type: 'boolean',
+        description: 'DROP + recreate the table (default false: fail if it exists)',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: true,
+      },
+    },
+    async execute(args, exec) {
+      const root = sessionWorkspace(exec)
+      const src = validateWorkspaceFile(args.source, root)
+      if (!src.ok) return failure(src.code, src.detail)
+      const written = await lakeWrite({
+        root, name: args.name, table: args.table,
+        source: src.path, replace: args.replace === true,
+        binary, timeoutMs: 120000,
+      })
+      if (!written.ok) return failure(written.code, written.detail)
+      return { ok: true, lake: args.name, table: args.table, replace: written.replace }
     },
   }))
 }
