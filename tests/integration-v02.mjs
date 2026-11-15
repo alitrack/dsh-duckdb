@@ -28,7 +28,7 @@ const ctx = {
 apply(ctx)
 const tools = Object.fromEntries(registered.map((t) => [t.name, t]))
 assert.deepEqual(Object.keys(tools).sort(),
-  ['duckdb_attach', 'duckdb_catalog', 'duckdb_convert', 'duckdb_query', 'duckdb_schema'])
+  ['duckdb_attach', 'duckdb_catalog', 'duckdb_convert', 'duckdb_extensions', 'duckdb_query', 'duckdb_schema'])
 console.log('✓ 5 tools registered:', Object.keys(tools).sort().join(', '))
 
 const ws = mkdtempSync(join(tmpdir(), 'dsh-duckdb-int-'))

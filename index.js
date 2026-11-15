@@ -20,6 +20,8 @@ import { clampMaxRows, projectRows } from './lib/rows.js'
 import { runQuery, readerFor, DUCKDB_BIN_ENV } from './lib/cli.js'
 import { Catalog } from './lib/catalog.js'
 import { validateConversion, buildConvertStatement } from './lib/convert.js'
+import { resolveGate, extensionAllowed, describeGate, ALLOW_REMOTE_ENV, ALLOW_EXTENSIONS_ENV } from './lib/extgate.js'
+import { checkRemoteAccess, checkLoadStatement } from './lib/guard.js'
 
 const name = 'dsh-duckdb'
 const inject = ['tools', 'systemPrompt']
@@ -65,6 +67,32 @@ function failure(code, detail, extra = {}) {
 export function apply(ctx) {
   const binary = process.env[DUCKDB_BIN_ENV]
   const catalog = new Catalog()
+  const gate = resolveGate()
+  const extensionAllowedFn = (name) => extensionAllowed(name, gate)
+  // Resolved async at first use: which allowed extensions are actually
+  // installed on this machine (a prelude LOAD of a missing extension would
+  // fail EVERY query, so the prelude only carries installed ones).
+  let installedProbe = null
+  const installedExtensions = () => {
+    if (installedProbe === null) {
+      installedProbe = runQuery({
+        statement: "SELECT extension_name FROM duckdb_extensions() WHERE installed",
+        files: [], maxRows: 200, unsigned: false, timeoutMs: DEFAULT_TIMEOUT_MS,
+        ...(binary !== undefined ? { binary } : {}),
+      }).then((r) => new Set(r.ok ? r.rows.map((row) => String(row.extension_name)) : []))
+        .catch(() => new Set())
+    }
+    return installedProbe
+  }
+  /**
+   * Prelude for one query: LOAD every operator-allowed extension that is
+   * confirmed installed. 'all' relies on DuckDB's own autoload instead.
+   */
+  const extensionPreludeFor = async () => {
+    if (gate.allowExtensions === 'all' || gate.allowExtensions.length === 0) return []
+    const installed = await installedExtensions()
+    return gate.allowExtensions.filter((e) => installed.has(e)).map((e) => `LOAD ${e}`)
+  }
 
   ctx.systemPrompt.section({
     name: 'tool:duckdb',
@@ -78,7 +106,9 @@ export function apply(ctx) {
       'sets read_only=false. ' +
       'For datasets reused across calls, attach them once with duckdb_attach (an alias, then query ' +
       'it as a table); duckdb_catalog lists attached aliases. duckdb_convert writes a workspace file ' +
-      'in parquet/csv/json/duckdb format.',
+      'in parquet/csv/json/duckdb format. ' +
+      `${describeGate(gate)}. Remote URLs (http/s3/gcs) are ${gate.allowRemote ? 'permitted' : 'blocked this session'} ` +
+      `(${ALLOW_REMOTE_ENV}=1 to enable). duckdb_extensions lists/loads permitted extensions.`,
   })
 
   ctx.tools.register(defineTool({
@@ -156,8 +186,18 @@ export function apply(ctx) {
       if (!single.ok) return failure(single.code, single.detail)
 
       const readOnly = args.read_only === undefined ? true : args.read_only === true
+
       const verdict = checkStatement(single.sql, readOnly)
       if (!verdict.ok) return failure(verdict.code, verdict.detail)
+
+      const remote = checkRemoteAccess(single.sql, gate.allowRemote)
+      if (!remote.ok) return failure(remote.code, remote.detail)
+
+      // Operator-allowed extensions are LOADed by the plugin as a prelude to
+      // every query (the CLI is a fresh process per call — a standalone LOAD
+      // would be a no-op for every later call). Only installed ones load; the
+      // model never writes LOAD itself.
+      const extensionPrelude = await extensionPreludeFor()
 
       const attached = resolveFiles(args.files, root)
       if (!attached.ok) return failure(attached.code, attached.detail)
@@ -180,6 +220,7 @@ export function apply(ctx) {
         unsigned: false,
         timeoutMs: DEFAULT_TIMEOUT_MS,
         signal: exec.signal,
+        extensionPrelude,
         ...(binary !== undefined ? { binary } : {}),
       })
 
@@ -509,6 +550,84 @@ export function apply(ctx) {
         return failure('NO_OUTPUT', `conversion reported success but no file appeared at ${verdict.output}`)
       }
       return { ok: true, output_path: verdict.output, bytes_out: bytesOut, duration_ms: Date.now() - started }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'duckdb_extensions',
+    description:
+      'List DuckDB extensions visible to this session: which are installed, which the operator ' +
+      'allows to be loaded, and which of those will be active (auto-loaded by the plugin). ' +
+      'The model cannot load or install extensions by itself — ask the operator to extend ' +
+      `the ${ALLOW_EXTENSIONS_ENV} allow list and restart.`,
+    timeoutMs: 15000,
+    parameters: {
+      filter: {
+        type: 'string',
+        description: "Optional filter: 'installed', 'allowed', or 'active'. Omit for all.",
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: true,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          extensions: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: true,
+              properties: {
+                name: { type: 'string', required: true },
+                installed: { type: 'boolean', required: true },
+                allowed: { type: 'boolean', required: true },
+                active: { type: 'boolean', required: true },
+              },
+            },
+          },
+          remote_enabled: { type: 'boolean' },
+          error: {
+            type: 'object',
+            additionalProperties: true,
+            properties: {
+              code: { type: 'string', required: true },
+              detail: { type: 'string', required: true },
+            },
+          },
+        },
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: value.ok
+          ? (value.extensions.length === 0
+              ? 'no extensions visible'
+              : value.extensions.map((e) => `${e.name}: ${e.active ? 'active' : e.installed ? 'installed' : 'not installed'}${e.allowed ? '' : ' (not allowed)'}`).join('\n'))
+              + `\nremote URLs: ${value.remote_enabled ? 'enabled' : 'blocked'}`
+          : `duckdb_extensions failed [${value.error.code}]: ${value.error.detail}`,
+      }],
+    },
+    async execute(args, _exec) {
+      const installed = await installedExtensions()
+      const rows = []
+      if (gate.allowExtensions === 'all') {
+        for (const name of [...installed].sort()) {
+          rows.push({ name, installed: true, allowed: true, active: true })
+        }
+      } else {
+        const names = [...new Set([...gate.allowExtensions, ...installed])].sort()
+        for (const name of names) {
+          const isInstalled = installed.has(name)
+          const isAllowed = extensionAllowedFn(name)
+          rows.push({ name, installed: isInstalled, allowed: isAllowed, active: isInstalled && isAllowed })
+        }
+      }
+      const filter = args.filter
+      const filtered = filter === 'installed' ? rows.filter((r) => r.installed)
+        : filter === 'allowed' ? rows.filter((r) => r.allowed)
+        : filter === 'active' ? rows.filter((r) => r.active)
+        : rows
+      return { ok: true, extensions: filtered, remote_enabled: gate.allowRemote }
     },
   }))
 }
