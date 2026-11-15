@@ -21,6 +21,8 @@ Query local data files with SQL from inside [DeepSeek Harness](https://github.co
 | `duckdb_convert` | Convert a workspace file to parquet/csv/json/duckdb (plugin-built COPY, output confined to the workspace) |
 | `duckdb_extensions` | List extensions: installed / operator-allowed / active; the model cannot LOAD or INSTALL by itself |
 | `duckdb_pipeline` | Run up to 20 guarded SQL steps as one background job (`job_output`/`job_list` poll it; requires `dsh-jobs-local` in the composition) |
+| `duckdb_lake_create` | Create (or reopen) a persistent DuckLake dataset under `<workspace>/lake-data/` — data that survives across sessions |
+| `duckdb_lake_write` | Copy a workspace csv/parquet/json file into a lake table; explicit `replace` only (never silent clobber). Query as `lake_<name>.<table>` |
 
 Attach files with the `files` argument; each becomes a view named `f0`, `f1`, ... in the order given. Supported inputs: `.csv` `.tsv` `.parquet` `.json` `.jsonl` `.ndjson` `.duckdb`.
 
