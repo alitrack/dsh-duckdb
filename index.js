@@ -22,9 +22,10 @@ import { Catalog } from './lib/catalog.js'
 import { validateConversion, buildConvertStatement } from './lib/convert.js'
 import { resolveGate, extensionAllowed, describeGate, ALLOW_REMOTE_ENV, ALLOW_EXTENSIONS_ENV } from './lib/extgate.js'
 import { checkRemoteAccess, checkLoadStatement } from './lib/guard.js'
+import { validatePipeline, pipelineJobSpec } from './lib/pipeline.js'
 
 const name = 'dsh-duckdb'
-const inject = ['tools', 'systemPrompt']
+const inject = ['tools', 'systemPrompt', 'jobs']
 
 /** Default per-call timeout. Must be cooperative: the CLI is killed on it. */
 const DEFAULT_TIMEOUT_MS = 30000
@@ -108,7 +109,9 @@ export function apply(ctx) {
       'it as a table); duckdb_catalog lists attached aliases. duckdb_convert writes a workspace file ' +
       'in parquet/csv/json/duckdb format. ' +
       `${describeGate(gate)}. Remote URLs (http/s3/gcs) are ${gate.allowRemote ? 'permitted' : 'blocked this session'} ` +
-      `(${ALLOW_REMOTE_ENV}=1 to enable). duckdb_extensions lists/loads permitted extensions.`,
+      `(${ALLOW_REMOTE_ENV}=1 to enable). duckdb_extensions lists/loads permitted extensions. ` +
+      'duckdb_pipeline runs a sequence of SQL steps as a background job (returns a job id; poll with ' +
+      'job_output, list with job_list) — use it for multi-step transformations instead of many calls.',
   })
 
   ctx.tools.register(defineTool({
@@ -628,6 +631,89 @@ export function apply(ctx) {
         : filter === 'active' ? rows.filter((r) => r.active)
         : rows
       return { ok: true, extensions: filtered, remote_enabled: gate.allowRemote }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'duckdb_pipeline',
+    description:
+      'Run a sequence of SQL statements as one background job (up to 20 steps). Each step gets the ' +
+      'same guard treatment as duckdb_query (single statement, read-only unless read_only=false, ' +
+      'workspace paths, extension prelude). Returns a job id immediately; read progress and results ' +
+      'with job_output, statuses with job_list. Steps stop at the first failure.',
+    timeoutMs: 30000,
+    parameters: {
+      label: {
+        type: 'string',
+        description: 'One-line pipeline name shown in job_list.',
+      },
+      steps: {
+        type: 'array',
+        required: true,
+        description: 'Ordered steps; each {sql, files?, read_only?, label?}.',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            sql: { type: 'string', required: true },
+            files: { type: 'array', items: { type: 'string' } },
+            read_only: { type: 'boolean' },
+            label: { type: 'string' },
+          },
+        },
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: true,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          job_id: { type: 'string' },
+          step_count: { type: 'number' },
+          error: {
+            type: 'object',
+            additionalProperties: true,
+            properties: { code: { type: 'string', required: true }, detail: { type: 'string', required: true } },
+          },
+        },
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: value.ok
+          ? `pipeline started: job ${value.job_id} (${value.step_count} steps) — poll with job_output`
+          : `duckdb_pipeline failed [${value.error.code}]: ${value.error.detail}`,
+      }],
+    },
+    async execute(args, exec) {
+      if (!ctx.jobs || typeof ctx.jobs.start !== 'function') {
+        return failure('JOBS_UNAVAILABLE', 'background jobs are not mounted in this composition (load @deepseek-ai/dsh-jobs-local)')
+      }
+      const validated = validatePipeline(args)
+      if (!validated.ok) return failure(validated.code, validated.detail)
+
+      // Pre-resolve every step's files now so a bad path fails before the job
+      // starts rather than halfway through (fail-fast over partial work).
+      const root = sessionWorkspace(exec)
+      for (let i = 0; i < validated.steps.length; i++) {
+        const step = validated.steps[i]
+        const rawFiles = typeof args.steps[i].files !== 'undefined' ? args.steps[i].files : []
+        const files = resolveFiles(rawFiles, root)
+        if (!files.ok) return failure(files.code, `steps[${i}]: ${files.detail}`)
+        step.resolvedFiles = files.files
+      }
+
+      const spec = pipelineJobSpec({
+        steps: validated.steps,
+        label: typeof args.label === 'string' && args.label.trim() !== '' ? args.label.trim().slice(0, 120) : `duckdb pipeline (${validated.steps.length} steps)`,
+        extensionPrelude: extensionPreludeFor,
+        resolveFiles: (_files, _root) => ({ ok: true }), // already resolved above
+        root,
+        ...(binary !== undefined ? { binary } : {}),
+        ...(exec.agent?.id !== undefined ? { owner: exec.agent.id } : {}),
+      })
+      const jobId = ctx.jobs.start(spec)
+      return { ok: true, job_id: jobId, step_count: validated.steps.length }
     },
   }))
 }
