@@ -18,6 +18,8 @@ import { validateWorkspaceFile } from './lib/paths.js'
 import { checkStatement, assertSingleStatement } from './lib/guard.js'
 import { clampMaxRows, projectRows } from './lib/rows.js'
 import { runQuery, readerFor, DUCKDB_BIN_ENV } from './lib/cli.js'
+import { Catalog } from './lib/catalog.js'
+import { validateConversion, buildConvertStatement } from './lib/convert.js'
 
 const name = 'dsh-duckdb'
 const inject = ['tools', 'systemPrompt']
@@ -62,6 +64,7 @@ function failure(code, detail, extra = {}) {
 
 export function apply(ctx) {
   const binary = process.env[DUCKDB_BIN_ENV]
+  const catalog = new Catalog()
 
   ctx.systemPrompt.section({
     name: 'tool:duckdb',
@@ -72,7 +75,10 @@ export function apply(ctx) {
       'attached as views f0, f1, ... in the order given. Call duckdb_schema first when a file is ' +
       'unfamiliar. Results are capped — a truncated result reports row_count and truncated=true, ' +
       'so refine the query instead of asking for more rows. Writes are rejected unless the call ' +
-      'sets read_only=false.',
+      'sets read_only=false. ' +
+      'For datasets reused across calls, attach them once with duckdb_attach (an alias, then query ' +
+      'it as a table); duckdb_catalog lists attached aliases. duckdb_convert writes a workspace file ' +
+      'in parquet/csv/json/duckdb format.',
   })
 
   ctx.tools.register(defineTool({
@@ -90,6 +96,7 @@ export function apply(ctx) {
         required: true,
         description:
           'One SQL statement. No statement batches. Reference attached files as f0, f1, ... ' +
+          'or a catalog alias attached via duckdb_attach as a plain table name, ' +
           'or call read_csv_auto/read_parquet on a workspace path directly.',
       },
       files: {
@@ -98,6 +105,12 @@ export function apply(ctx) {
         description:
           'Absolute paths of data files to attach, in order. Each becomes a view f0, f1, ... ' +
           'Supported: .csv .tsv .parquet .json .jsonl .ndjson .duckdb',
+      },
+      alias: {
+        type: 'string',
+        description:
+          'Name of an alias previously attached with duckdb_attach; its files become views ' +
+          'f0, f1, ... exactly as if passed via `files` (existing files list is prepended).',
       },
       max_rows: {
         type: 'integer',
@@ -149,12 +162,20 @@ export function apply(ctx) {
       const attached = resolveFiles(args.files, root)
       if (!attached.ok) return failure(attached.code, attached.detail)
 
+      // Merge catalog alias files behind explicit files, then dedupe.
+      let files = attached.files
+      if (args.alias !== undefined) {
+        const resolvedAlias = catalog.resolve(args.alias, root)
+        if (!resolvedAlias.ok) return failure(resolvedAlias.code, resolvedAlias.detail)
+        files = [...files, ...resolvedAlias.files.filter((f) => !files.includes(f))]
+      }
+
       const maxRows = clampMaxRows(args.max_rows)
       const started = Date.now()
 
       const result = await runQuery({
         statement: single.sql,
-        files: attached.files,
+        files,
         maxRows,
         unsigned: false,
         timeoutMs: DEFAULT_TIMEOUT_MS,
@@ -176,7 +197,7 @@ export function apply(ctx) {
       let columnTypes
       try {
         const described = await runQuery({
-          statement: describeStatementFor(single.sql, attached.files),
+          statement: describeStatementFor(single.sql, files),
           files: [],
           maxRows: 1,
           unsigned: false,
@@ -321,6 +342,173 @@ export function apply(ctx) {
         ...(sizeBytes !== undefined ? { size_bytes: sizeBytes } : {}),
         duration_ms: Date.now() - started,
       }
+    },
+  }))
+  ctx.tools.register(defineTool({
+    name: 'duckdb_attach',
+    description:
+      'Register data files (or glob patterns) under a short alias, once per session. Later calls ' +
+      'pass `alias` to duckdb_query/duckdb_schema instead of repeating long paths. Paths must be ' +
+      'absolute and inside the workspace; aliases are lowercase identifiers.',
+    timeoutMs: 10000,
+    parameters: {
+      alias: {
+        type: 'string',
+        required: true,
+        description: "Alias name, e.g. 'sales'. Match /^[a-z][a-z0-9_]{0,63}$/.",
+      },
+      files: {
+        type: 'array',
+        items: { type: 'string' },
+        required: true,
+        description:
+          'Absolute workspace paths or glob patterns (e.g. /ws/data/*.parquet). Each becomes a view ' +
+          'f0, f1, ... in sorted order when the alias is used.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: true,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          alias: { type: 'string' },
+          files: { type: 'array', items: { type: 'string' } },
+          file_count: { type: 'integer' },
+          error: {
+            type: 'object',
+            additionalProperties: true,
+            properties: {
+              code: { type: 'string', required: true },
+              detail: { type: 'string', required: true },
+            },
+          },
+        },
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: value.ok
+          ? `attached ${value.alias}: ${value.file_count} file(s) → views f0..f${Math.max(0, value.file_count - 1)} on use`
+          : `duckdb_attach failed [${value.error.code}]: ${value.error.detail}`,
+      }],
+    },
+    execute(args, exec) {
+      const root = sessionWorkspace(exec)
+      const result = catalog.attach(args.files, args.alias, root)
+      if (!result.ok) return failure(result.code, result.detail)
+      return { ok: true, alias: result.alias, files: result.files, file_count: result.files.length }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'duckdb_catalog',
+    description: 'List aliases attached in this workspace with their file counts.',
+    timeoutMs: 5000,
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: true,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          attachments: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: true,
+              properties: {
+                alias: { type: 'string', required: true },
+                file_count: { type: 'integer', required: true },
+                created_at: { type: 'integer' },
+              },
+            },
+          },
+        },
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: value.attachments.length === 0
+          ? 'no attachments; call duckdb_attach first'
+          : value.attachments.map((a) => `${a.alias}: ${a.file_count} file(s)`).join('\n'),
+      }],
+    },
+    execute(_args, exec) {
+      return { ok: true, attachments: catalog.list(sessionWorkspace(exec)) }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'duckdb_convert',
+    description:
+      'Convert a workspace data file to parquet/csv/json/duckdb. The plugin builds the statement; ' +
+      'you supply paths and a format only. Output must be a new file inside the workspace.',
+    timeoutMs: DEFAULT_TIMEOUT_MS,
+    parameters: {
+      input: {
+        type: 'string',
+        required: true,
+        description: 'Absolute workspace path of the source file.',
+      },
+      output: {
+        type: 'string',
+        required: true,
+        description: 'Absolute workspace path of the target; must end with .parquet/.csv/.json/.duckdb.',
+      },
+      output_format: {
+        type: 'string',
+        required: true,
+        description: 'One of: parquet, csv, json, duckdb.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: true,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          output_path: { type: 'string' },
+          bytes_out: { type: 'integer' },
+          duration_ms: { type: 'integer' },
+          error: {
+            type: 'object',
+            additionalProperties: true,
+            properties: {
+              code: { type: 'string', required: true },
+              detail: { type: 'string', required: true },
+            },
+          },
+        },
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: value.ok
+          ? `converted → ${value.output_path} (${value.bytes_out} bytes, ${value.duration_ms}ms)`
+          : `duckdb_convert failed [${value.error.code}]: ${value.error.detail}`,
+      }],
+    },
+    async execute(args, exec) {
+      const root = sessionWorkspace(exec)
+      const verdict = validateConversion(args.input, args.output, args.output_format, root)
+      if (!verdict.ok) return failure(verdict.code, verdict.detail)
+
+      const started = Date.now()
+      const result = await runQuery({
+        statement: buildConvertStatement(verdict.input, verdict.output, verdict.format),
+        files: [],
+        maxRows: 0,
+        unsigned: false,
+        timeoutMs: DEFAULT_TIMEOUT_MS,
+        signal: exec.signal,
+        wrap: false,
+        ...(binary !== undefined ? { binary } : {}),
+      })
+      if (!result.ok) return failure(result.code, result.detail)
+
+      const bytesOut = fileSize(verdict.output)
+      if (bytesOut === undefined) {
+        return failure('NO_OUTPUT', `conversion reported success but no file appeared at ${verdict.output}`)
+      }
+      return { ok: true, output_path: verdict.output, bytes_out: bytesOut, duration_ms: Date.now() - started }
     },
   }))
 }

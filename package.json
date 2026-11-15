@@ -1,6 +1,6 @@
 {
   "name": "dsh-duckdb",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Query local data files with SQL from inside DeepSeek Harness (dsh) — zero Python, zero external services.",
   "type": "module",
   "main": "index.js",
