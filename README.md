@@ -14,8 +14,11 @@ Query local data files with SQL from inside [DeepSeek Harness](https://github.co
 
 | Tool | Purpose |
 |---|---|
-| `duckdb_query` | Run **one** SQL statement against local data files through the DuckDB engine |
+| `duckdb_query` | Run **one** SQL statement against local data files through the DuckDB engine; files can come from `files` paths, a `duckdb_attach` alias, or both |
 | `duckdb_schema` | Describe a file's columns, types, nullability, sample rows and approximate row count before querying it |
+| `duckdb_attach` | Register files or glob patterns under a short alias for reuse across calls (session catalog) |
+| `duckdb_catalog` | List aliases attached in this workspace |
+| `duckdb_convert` | Convert a workspace file to parquet/csv/json/duckdb (plugin-built COPY, output confined to the workspace) |
 
 Attach files with the `files` argument; each becomes a view named `f0`, `f1`, ... in the order given. Supported inputs: `.csv` `.tsv` `.parquet` `.json` `.jsonl` `.ndjson` `.duckdb`.
 
